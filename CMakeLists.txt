@@ -1,0 +1,46 @@
+cmake_minimum_required(VERSION 3.18)
+project(fastchroma LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
+find_package(pybind11 CONFIG REQUIRED)
+find_package(Threads REQUIRED)
+
+# Backend: vDSP on Apple, PFFFT elsewhere. Override with -DFASTCHROMA_FFT=pffft.
+set(FASTCHROMA_FFT "auto" CACHE STRING "FFT backend: auto | vdsp | pffft")
+if(FASTCHROMA_FFT STREQUAL "auto")
+  if(APPLE)
+    set(FASTCHROMA_FFT "vdsp")
+  else()
+    set(FASTCHROMA_FFT "pffft")
+  endif()
+endif()
+message(STATUS "fastchroma FFT backend: ${FASTCHROMA_FFT}")
+
+pybind11_add_module(_fastchroma src/fastchroma.cpp src/bindings.cpp)
+target_include_directories(_fastchroma PRIVATE src src/third_party)
+target_link_libraries(_fastchroma PRIVATE Threads::Threads)
+
+if(FASTCHROMA_FFT STREQUAL "vdsp")
+  find_library(ACCELERATE Accelerate REQUIRED)
+  target_link_libraries(_fastchroma PRIVATE ${ACCELERATE})
+elseif(FASTCHROMA_FFT STREQUAL "pffft")
+  target_sources(_fastchroma PRIVATE src/third_party/pffft.c)
+  target_compile_definitions(_fastchroma PRIVATE FASTCHROMA_NO_ACCELERATE)
+else()
+  message(FATAL_ERROR "Unknown FASTCHROMA_FFT='${FASTCHROMA_FFT}' (use vdsp or pffft)")
+endif()
+
+if(MSVC)
+  target_compile_options(_fastchroma PRIVATE /O2 /fp:fast)
+else()
+  target_compile_options(_fastchroma PRIVATE -O3 -ffast-math -funroll-loops)
+endif()
+
+install(TARGETS _fastchroma DESTINATION fastchroma)

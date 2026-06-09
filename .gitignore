@@ -1,0 +1,18 @@
+# build artifacts
+/build/
+/dist/
+/wheelhouse/
+*.so
+*.pyd
+*.egg-info/
+_skbuild/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# editor / tooling
+.cache/
+compile_commands.json
+.DS_Store

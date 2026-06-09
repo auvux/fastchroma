@@ -1,0 +1,41 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "fastchroma"
+version = "0.1.0"
+description = "Fast constant-Q transform and chromagram"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_LICENSES"]
+authors = [{ name = "Peter Kiers", email = "pkiers.1983@gmail.com" }]
+keywords = ["audio", "dsp", "cqt", "constant-q", "chroma", "chromagram", "music"]
+dependencies = ["numpy>=1.20"]
+classifiers = [
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "librosa", "soxr"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+wheel.packages = ["python/fastchroma"]
+cmake.version = ">=3.18"
+build-dir = "build/{wheel_tag}"
+
+[tool.cibuildwheel]
+build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+skip = "*-musllinux* *_i686"
+test-requires = "pytest"
+test-command = "pytest {project}/tests -q"
+
+[tool.cibuildwheel.macos]
+archs = ["arm64", "x86_64"]
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
