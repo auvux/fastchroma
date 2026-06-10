@@ -6,8 +6,8 @@ The constant-Q transform (Brown 1991; Schörkhuber & Klapuri 2010) and the
 chromagram (Fujishima 1999) are standard music-analysis features. `fastchroma`
 implements them directly in C++ with a per-platform FFT backend and a recursive
 octave decimation that keeps memory bounded. On Apple-silicon Macs the whole
-transform additionally runs on the GPU (Metal). Its only runtime dependency is
-NumPy (inputs and outputs are NumPy arrays).
+transform additionally runs on the GPU (Metal), and on NVIDIA GPUs (CUDA). Its
+only runtime dependency is NumPy (inputs and outputs are NumPy arrays).
 
 ## Install
 
@@ -49,9 +49,12 @@ chroma = fastchroma.chroma(y, sr=22050)
 ```
 
 Output mirrors input (as in fastmel): numpy in → numpy out; a torch tensor in
-→ a torch tensor out on the same device. torch MPS tensors are staged through
-unified memory and computed by the Metal backend (torch is imported lazily,
-never required); CUDA tensors are rejected — move them to host first.
+→ a torch tensor out on the same device. On CUDA builds, torch CUDA tensors
+and CuPy arrays are processed in place — no host round trip — via DLPack,
+with the kernels enqueued on the caller's current stream like a native
+framework op. torch MPS tensors are staged through unified memory and
+computed by the Metal backend. torch/CuPy are imported lazily, never
+required.
 
 Mono input, equal temperament. Use a hop divisible by `2 ** (n_octaves - 1)`
 (e.g. 512 or 1024) — an odd hop disables the recursive decimation and inflates
@@ -60,7 +63,7 @@ memory (you'll get a warning).
 ## Performance
 
 `fastchroma` is typically **3–15× faster** than other Python implementations
-on the CPU, and **40–120× faster** with the Metal backend, with numerically
+on the CPU, and **40–120× faster** with the GPU backends, with numerically
 equivalent output (matched to within float32 rounding).
 
 ## Backends
@@ -68,18 +71,26 @@ equivalent output (matched to within float32 rounding).
 | Platform | FFT (CPU) | GPU |
 |----------|-----------|-----|
 | macOS    | Accelerate / vDSP | Metal (Apple silicon) |
-| Linux, Windows | PFFFT (SIMD) | — |
+| Linux, Windows | PFFFT (SIMD) | CUDA (NVIDIA) |
 
-On machines where Metal is available (`fastchroma.metal_available()`), the
-default `backend="auto"` runs the CQT (all output variants, including
+On machines where a GPU backend is available (`fastchroma.gpu_available()`),
+the default `backend="auto"` runs the CQT (all output variants, including
 complex) and chroma on the GPU, and falls back to the CPU otherwise —
 including for parameter combinations the GPU path does not support (e.g.
 hops without enough factors of two). Force a path with `backend="cpu"` /
-`backend="metal"`, or set the `FASTCHROMA_BACKEND` environment variable. The
-two backends agree to ~1e-6 relative; bit-exactness across backends (or across
-platforms) is not guaranteed.
+`backend="gpu"` (or the explicit vendor names `"metal"` / `"cuda"`), or set
+the `FASTCHROMA_BACKEND` environment variable. The backends agree to ~1e-6
+relative; bit-exactness across backends (or across platforms) is not
+guaranteed.
 
-Override the FFT at build time with `-DFASTCHROMA_FFT=pffft`.
+Override the FFT at build time with `-DFASTCHROMA_FFT=pffft`, and the GPU
+backend with `-DFASTCHROMA_GPU=metal|cuda|none` (default: Metal on macOS,
+CUDA where `nvcc` is found, none otherwise). Linux and Windows wheels ship
+with the CUDA backend built in (SASS for sm_60–sm_120 plus PTX, statically
+linked cudart): at runtime they need only the NVIDIA driver — no CUDA
+toolkit — and fall back to the CPU path on machines without one. Building
+from source needs a CUDA toolkit for the CUDA backend; without one the
+build is CPU-only.
 
 ## See also
 

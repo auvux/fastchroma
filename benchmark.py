@@ -63,10 +63,14 @@ def build_impls(mode, sr, hop, bpo, n_octaves, n_bins, include_extra=False):
                                   bins_per_octave=bpo, backend=backend)
 
         impls["fastchroma-cpu"] = lambda y: _fc(y, "cpu")
-        if getattr(fastchroma, "metal_available", lambda: False)():
-            impls["fastchroma-gpu"] = lambda y: _fc(y, "metal")
+        if hasattr(fastchroma, "gpu_available"):
+            gpu_ok, gpu_name = fastchroma.gpu_available(), "gpu"
+        else:  # pre-CUDA fastchroma
+            gpu_ok, gpu_name = fastchroma.metal_available(), "metal"
+        if gpu_ok:
+            impls["fastchroma-gpu"] = lambda y: _fc(y, gpu_name)
         elif sys.platform == "darwin":
-            print("  note: metal backend unavailable on this machine", file=sys.stderr)
+            print("  note: GPU backend unavailable on this machine", file=sys.stderr)
     except Exception as e:  # noqa: BLE001
         print(f"  note: fastchroma unavailable ({e})", file=sys.stderr)
 

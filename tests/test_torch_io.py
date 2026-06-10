@@ -60,10 +60,46 @@ def test_torch_mps_mirror():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
-def test_torch_cuda_rejected():
-    y = torch.from_numpy(signal_np()).cuda()
-    with pytest.raises(TypeError, match="cuda"):
-        fastchroma.cqt(y, sr=SR)
+def test_torch_cuda_mirror():
+    # On CUDA builds this is the device-resident (DLPack) path: no host
+    # round trip, result allocated on the GPU.
+    y = signal_np()
+    y_cuda = torch.from_numpy(y).cuda()
+    out = fastchroma.cqt(y_cuda, sr=SR)
+    assert isinstance(out, torch.Tensor) and out.device.type == "cuda"
+    ref = fastchroma.cqt(y, sr=SR)
+    assert np.allclose(out.cpu().numpy(), ref, rtol=1e-5, atol=1e-6)
+
+    ch = fastchroma.chroma(y_cuda, sr=SR)
+    assert ch.device.type == "cuda"
+    ch_ref = fastchroma.chroma(y, sr=SR)
+    assert np.allclose(ch.cpu().numpy(), ch_ref, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
+def test_torch_cuda_complex():
+    y = signal_np()
+    z = fastchroma.cqt(torch.from_numpy(y).cuda(), sr=SR, output="complex")
+    assert isinstance(z, torch.Tensor) and z.device.type == "cuda"
+    assert z.dtype == torch.complex64
+    ref = fastchroma.cqt(y, sr=SR, output="complex", backend="cpu")
+    peak = float(np.max(np.abs(ref)))
+    assert float(np.max(np.abs(z.cpu().numpy() - ref))) / peak < 2e-5
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
+def test_torch_cuda_unsupported_hop_falls_back():
+    # hop=100 lacks the factors of two the GPU path needs; under auto the
+    # resident path must fall back (through host staging, to the CPU) and
+    # still return a CUDA tensor.
+    import warnings
+    y = signal_np()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # odd-hop performance warning
+        out = fastchroma.cqt(torch.from_numpy(y).cuda(), sr=SR, hop_length=100)
+        ref = fastchroma.cqt(y, sr=SR, hop_length=100, backend="cpu")
+    assert out.device.type == "cuda"
+    assert np.array_equal(out.cpu().numpy(), ref)
 
 
 def test_gradient_tensors_accepted():

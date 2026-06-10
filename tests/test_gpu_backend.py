@@ -1,6 +1,6 @@
-"""Metal (GPU) backend vs the CPU path, through the public API.
+"""GPU backend (Metal or CUDA) vs the CPU path, through the public API.
 
-Skipped wherever the backend is unavailable (non-macOS, no unified-memory GPU).
+Skipped wherever no GPU backend can run (CPU-only build, no usable device).
 """
 import threading
 import warnings
@@ -10,8 +10,8 @@ import pytest
 
 import fastchroma
 
-pytestmark = pytest.mark.skipif(not fastchroma.metal_available(),
-                                reason="metal backend not available")
+pytestmark = pytest.mark.skipif(not fastchroma.gpu_available(),
+                                reason="GPU backend not available")
 
 SR = 22050
 # Both backends use the exact same filterbank values; differences come only
@@ -49,7 +49,7 @@ def assert_close(gpu, cpu):
 def test_cqt_matches_cpu(bpo, n_bins):
     y = signal()
     kw = dict(sr=SR, hop_length=512, n_bins=n_bins, bins_per_octave=bpo)
-    assert_close(fastchroma.cqt(y, **kw, backend="metal"),
+    assert_close(fastchroma.cqt(y, **kw, backend="gpu"),
                  fastchroma.cqt(y, **kw, backend="cpu"))
 
 
@@ -57,7 +57,7 @@ def test_cqt_matches_cpu(bpo, n_bins):
 def test_cqt_fmin(fmin):
     y = signal()
     kw = dict(sr=SR, hop_length=512, n_bins=72, bins_per_octave=12, fmin=fmin)
-    assert_close(fastchroma.cqt(y, **kw, backend="metal"),
+    assert_close(fastchroma.cqt(y, **kw, backend="gpu"),
                  fastchroma.cqt(y, **kw, backend="cpu"))
 
 
@@ -66,24 +66,24 @@ def test_cqt_fmin(fmin):
 def test_cqt_hop_and_odd_length(hop, odd):
     y = signal(2.37, odd=odd)
     kw = dict(sr=SR, hop_length=hop, n_bins=72, bins_per_octave=12)
-    assert_close(fastchroma.cqt(y, **kw, backend="metal"),
+    assert_close(fastchroma.cqt(y, **kw, backend="gpu"),
                  fastchroma.cqt(y, **kw, backend="cpu"))
 
 
 def test_power_and_db_output():
     y = signal(1.0)
-    m = fastchroma.cqt(y, sr=SR, backend="metal")
-    p = fastchroma.cqt(y, sr=SR, backend="metal", output="power")
-    db = fastchroma.cqt(y, sr=SR, backend="metal", output="db")
+    m = fastchroma.cqt(y, sr=SR, backend="gpu")
+    p = fastchroma.cqt(y, sr=SR, backend="gpu", output="power")
+    db = fastchroma.cqt(y, sr=SR, backend="gpu", output="db")
     # power is computed in-kernel as ar^2+ai^2; magnitude is its sqrt, so the
     # round trip differs by float rounding only.
     assert np.allclose(p, m * m, rtol=1e-6, atol=1e-12)
     assert np.allclose(db, 10.0 * np.log10(np.maximum(p, 1e-10)), rtol=1e-5, atol=1e-4)
 
 
-def test_complex_metal_matches_cpu():
+def test_complex_gpu_matches_cpu():
     y = signal()
-    z_gpu = fastchroma.cqt(y, sr=SR, output="complex", backend="metal")
+    z_gpu = fastchroma.cqt(y, sr=SR, output="complex", backend="gpu")
     z_cpu = fastchroma.cqt(y, sr=SR, output="complex", backend="cpu")
     assert z_gpu.dtype == np.complex64 and z_gpu.shape == z_cpu.shape
     peak = float(np.max(np.abs(z_cpu)))
@@ -94,7 +94,7 @@ def test_complex_metal_matches_cpu():
 def test_chroma_matches_cpu(bpo, n_octaves):
     y = signal()
     kw = dict(sr=SR, hop_length=512, bins_per_octave=bpo, n_octaves=n_octaves)
-    gpu = fastchroma.chroma(y, **kw, backend="metal")
+    gpu = fastchroma.chroma(y, **kw, backend="gpu")
     cpu = fastchroma.chroma(y, **kw, backend="cpu")
     # Chroma frames are L-infinity normalized, so compare absolutely.
     assert gpu.shape == cpu.shape
@@ -112,12 +112,12 @@ def test_auto_falls_back_on_unsupported_hop():
     assert np.array_equal(auto, cpu)
 
 
-def test_forced_metal_raises_on_unsupported_hop():
+def test_forced_gpu_raises_on_unsupported_hop():
     y = signal(1.0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        with pytest.raises(RuntimeError, match="metal"):
-            fastchroma.cqt(y, sr=SR, hop_length=100, backend="metal")
+        with pytest.raises(RuntimeError, match="gpu"):
+            fastchroma.cqt(y, sr=SR, hop_length=100, backend="gpu")
 
 
 def test_complex_auto_runs():
@@ -127,7 +127,18 @@ def test_complex_auto_runs():
 
 def test_bad_backend_name():
     with pytest.raises(ValueError, match="backend"):
-        fastchroma.cqt(signal(1.0), sr=SR, backend="cuda")
+        fastchroma.cqt(signal(1.0), sr=SR, backend="opencl")
+
+
+def test_vendor_backend_names():
+    # The vendor name this build carries works like "gpu"; the other raises.
+    mine = fastchroma.gpu_backend()
+    other = {"metal": "cuda", "cuda": "metal"}[mine]
+    y = signal(1.0)
+    assert_close(fastchroma.cqt(y, sr=SR, backend=mine),
+                 fastchroma.cqt(y, sr=SR, backend="cpu"))
+    with pytest.raises(RuntimeError, match=other):
+        fastchroma.cqt(y, sr=SR, backend=other)
 
 
 def test_threaded_calls_match():
@@ -146,7 +157,7 @@ def test_threaded_calls_match():
     def work(slot, y, bpo):
         try:
             results[slot] = fastchroma.cqt(y, sr=SR, hop_length=512, n_bins=bpo * 7,
-                                           bins_per_octave=bpo, backend="metal")
+                                           bins_per_octave=bpo, backend="gpu")
         except Exception as e:  # noqa: BLE001
             errors.append(e)
 

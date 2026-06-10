@@ -16,15 +16,18 @@ for batch / dataset preprocessing:
 One-shot functional forms (``cqt``, ``chroma``) are also provided. Mono input,
 equal temperament.
 
-On Apple-silicon Macs the transform runs on the GPU (Metal) by default — all
-output variants, including complex; pass ``backend="cpu"`` /
-``backend="metal"`` to force a path, or set the ``FASTCHROMA_BACKEND``
-environment variable.
+On Apple-silicon Macs the transform runs on the GPU (Metal) by default, and on
+NVIDIA GPUs via CUDA — all output variants, including complex. Pass
+``backend="cpu"`` / ``backend="gpu"`` (or the explicit ``"metal"`` /
+``"cuda"``) to force a path, or set the ``FASTCHROMA_BACKEND`` environment
+variable.
 
 Output mirrors input (like fastmel): numpy in, numpy out; a torch tensor in,
-a torch tensor out on the same device. torch MPS tensors are staged through
-unified memory and computed by the Metal backend; torch is imported lazily,
-never required.
+a torch tensor out on the same device. On CUDA builds, torch CUDA tensors and
+CuPy arrays are processed in place — no host round trip — via DLPack, with
+the work enqueued on the caller's current stream. torch MPS tensors are
+staged through unified memory and computed by the Metal backend. torch/CuPy
+are imported lazily, never required.
 """
 from __future__ import annotations
 
@@ -37,19 +40,29 @@ import numpy as np
 from . import _fastchroma
 from ._version import __version__
 
-__all__ = ["CQT", "Chroma", "cqt", "chroma", "cqt_frequencies", "metal_available",
-           "__version__"]
+__all__ = ["CQT", "Chroma", "cqt", "chroma", "cqt_frequencies", "gpu_available",
+           "gpu_backend", "metal_available", "__version__"]
 
 _C1_HZ = 32.70319566257483  # note C1 = 440 * 2 ** ((24 - 69) / 12), A440 / 12-TET
 
-_BACKENDS = ("auto", "cpu", "metal")
+_BACKENDS = ("auto", "cpu", "gpu", "metal", "cuda")
 _OUTPUTS = ("magnitude", "complex", "power", "db")
-_METAL_MODE = {"magnitude": 0, "power": 1, "db": 2}
+_GPU_MODE = {"magnitude": 0, "power": 1, "db": 2}
+
+
+def gpu_available():
+    """True when this build's GPU backend (Metal or CUDA) can run here."""
+    return _fastchroma.gpu_available()
+
+
+def gpu_backend():
+    """Which GPU backend this build carries: 'metal', 'cuda', or 'none'."""
+    return _fastchroma.gpu_backend()
 
 
 def metal_available():
     """True when the Metal (GPU) backend can run on this machine."""
-    return _fastchroma.metal_available()
+    return _fastchroma.gpu_backend() == "metal" and _fastchroma.gpu_available()
 
 
 def _as_mono_f32(y):
@@ -59,26 +72,31 @@ def _as_mono_f32(y):
     caller's library, mirroring fastmel: numpy in -> numpy out, torch in ->
     torch out (same device). torch is imported lazily, never required.
 
-    A torch MPS tensor is staged through host memory (cheap on unified
-    memory) and computed by the Metal backend; the result returns on MPS.
+    torch MPS tensors are staged through host memory (cheap on unified
+    memory) and the result returns on MPS. torch CUDA tensors and CuPy
+    arrays normally take the resident DLPack path before reaching here;
+    this host staging is their fallback (CPU build, or parameters the GPU
+    path does not support), and the result still returns on their device.
     """
     module = type(y).__module__.partition(".")[0]
     if module == "torch":
         import torch
         device = y.device
-        if device.type not in ("cpu", "mps"):
+        if device.type not in ("cpu", "mps", "cuda"):
             raise TypeError(
                 f"fastchroma has no {device.type} backend; move the tensor to the "
                 "host first (y.cpu())")
         t = y.detach()
-        if device.type == "mps":
+        if device.type != "cpu":
             t = t.cpu()
         arr = np.ascontiguousarray(t.numpy(), dtype=np.float32).ravel()
-        if device.type == "mps":
+        if device.type != "cpu":
             return arr, lambda out: torch.from_numpy(out).to(device)
         return arr, torch.from_numpy
     if module == "cupy":
-        raise TypeError("fastchroma has no CUDA backend; pass cupy.asnumpy(y)")
+        import cupy
+        arr = np.ascontiguousarray(cupy.asnumpy(y), dtype=np.float32).ravel()
+        return arr, cupy.asarray
     return np.ascontiguousarray(y, dtype=np.float32).ravel(), lambda out: out
 
 
@@ -87,7 +105,73 @@ def _resolve_backend(backend: str) -> str:
         backend = os.environ.get("FASTCHROMA_BACKEND", "auto").lower() or "auto"
     if backend not in _BACKENDS:
         raise ValueError(f"backend must be one of {_BACKENDS}; got {backend!r}")
+    if backend in ("metal", "cuda") and _fastchroma.gpu_backend() != backend:
+        raise RuntimeError(
+            f"this fastchroma build has no {backend} backend "
+            f"(its GPU backend is {_fastchroma.gpu_backend()!r})")
     return backend
+
+
+def _gpu_unavailable_error(backend: str) -> RuntimeError:
+    return RuntimeError(
+        f"{backend} backend unavailable on this machine or unsupported for "
+        "these parameters (e.g. a hop without enough factors of two)")
+
+
+_NOT_RESIDENT = object()
+
+
+def _try_resident(y, call, forced):
+    """GPU-resident path: DLPack in, DLPack out, same device (as in fastmel).
+
+    `call(capsule, stream)` runs the C++ resident compute and returns an
+    output capsule. The kernels are enqueued on the caller's current CUDA
+    stream (DLPack stream handoff) and the call returns without host
+    synchronization, like a native framework op; the input is made visible
+    to that stream by ``__dlpack__(stream=...)``.
+
+    Returns _NOT_RESIDENT when the input is not a GPU-resident tensor or
+    this build cannot take it; the caller falls back to host staging. A
+    RuntimeError (e.g. an unsupported hop) likewise falls back unless the
+    backend was forced.
+    """
+    if _fastchroma.gpu_backend() != "cuda":
+        return _NOT_RESIDENT
+    module = type(y).__module__.partition(".")[0]
+    if module == "torch":
+        import torch
+        if y.device.type != "cuda":
+            return _NOT_RESIDENT
+        if y.device.index not in (None, 0):
+            raise NotImplementedError("only CUDA device 0 is supported")
+        src = y.detach()
+        if src.dtype != torch.float32:
+            src = src.float()
+        src = src.reshape(-1).contiguous()
+        stream = torch.cuda.current_stream().cuda_stream or 1  # 1 = legacy default
+    elif module == "cupy":
+        import cupy
+        src = y
+        if src.dtype != cupy.float32:
+            src = src.astype(cupy.float32)
+        src = cupy.ascontiguousarray(src).ravel()
+        stream = cupy.cuda.get_current_stream().ptr or 1
+    else:
+        return _NOT_RESIDENT
+    try:
+        out = call(src.__dlpack__(stream=stream), stream)
+    except RuntimeError:
+        if forced:
+            raise
+        return _NOT_RESIDENT
+    if module == "torch":
+        import torch
+        return torch.from_dlpack(out)
+    import cupy
+    try:
+        return cupy.from_dlpack(out)
+    except TypeError:  # older CuPy takes capsules via fromDlpack
+        return cupy.fromDlpack(out)
 
 
 def cqt_frequencies(n_bins, *, fmin=0.0, bins_per_octave=12):
@@ -130,21 +214,30 @@ class CQT:
     def __call__(self, y, *, output="magnitude", backend="auto"):
         if output not in _OUTPUTS:
             raise ValueError(f"output must be one of {_OUTPUTS}; got {output!r}")
-        y, rewrap = _as_mono_f32(y)
         backend = _resolve_backend(backend)
+
+        if backend != "cpu":
+            mode = 3 if output == "complex" else _GPU_MODE[output]
+            out = _try_resident(
+                y, lambda cap, stream: _fastchroma.cqt_dlpack(
+                    cap, self.sr, self.hop_length, self.fmin, self.n_bins,
+                    self.bins_per_octave, mode, stream),
+                forced=backend != "auto")
+            if out is not _NOT_RESIDENT:
+                return out
+
+        y, rewrap = _as_mono_f32(y)
         args = (y, self.sr, self.hop_length, self.fmin, self.n_bins, self.bins_per_octave)
 
         if backend != "cpu":
             if output == "complex":
-                m = _fastchroma.cqt_complex_metal(*args)
+                m = _fastchroma.cqt_complex_gpu(*args)
             else:
-                m = _fastchroma.cqt_metal(*args, _METAL_MODE[output])  # in-kernel epilogue
+                m = _fastchroma.cqt_gpu(*args, _GPU_MODE[output])  # in-kernel epilogue
             if m is not None:
                 return rewrap(m)
-            if backend == "metal":
-                raise RuntimeError(
-                    "metal backend unavailable on this machine or unsupported for "
-                    "these parameters (e.g. a hop without enough factors of two)")
+            if backend != "auto":
+                raise _gpu_unavailable_error(backend)
 
         if output == "complex":
             return rewrap(_fastchroma.cqt_complex(*args))
@@ -175,18 +268,26 @@ class Chroma:
                 f"n_chroma={self.n_chroma}, fmin={self.fmin:g})")
 
     def __call__(self, y, *, backend="auto"):
-        y, rewrap = _as_mono_f32(y)
         backend = _resolve_backend(backend)
+
+        if backend != "cpu":
+            out = _try_resident(
+                y, lambda cap, stream: _fastchroma.chroma_dlpack(
+                    cap, self.sr, self.hop_length, self.bins_per_octave,
+                    self.n_octaves, self.n_chroma, self.fmin, stream),
+                forced=backend != "auto")
+            if out is not _NOT_RESIDENT:
+                return out
+
+        y, rewrap = _as_mono_f32(y)
         args = (y, self.sr, self.hop_length, self.bins_per_octave, self.n_octaves,
                 self.n_chroma, self.fmin)
         if backend != "cpu":
-            m = _fastchroma.chroma_metal(*args)
+            m = _fastchroma.chroma_gpu(*args)
             if m is not None:
                 return rewrap(m)
-            if backend == "metal":
-                raise RuntimeError(
-                    "metal backend unavailable on this machine or unsupported for "
-                    "these parameters (e.g. a hop without enough factors of two)")
+            if backend != "auto":
+                raise _gpu_unavailable_error(backend)
         return rewrap(_fastchroma.chroma(*args))
 
 

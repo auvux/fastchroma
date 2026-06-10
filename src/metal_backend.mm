@@ -434,7 +434,7 @@ Engine& engine_for(const CqtParams& p) {
 
 }  // namespace
 
-bool metal_available() {
+bool gpu_available() {
     static const bool ok = [] {
         @autoreleasepool {
             id<MTLDevice> dev = shared_device();
@@ -448,9 +448,11 @@ bool metal_available() {
     return ok;
 }
 
-static bool run_metal(const float* y, std::size_t n, const CqtParams& p, int mode, Matrix* outf,
-                      ComplexMatrix* outc) {
-    if (!metal_available() || n < 1 || n > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+const char* gpu_backend() { return "metal"; }
+
+static bool run_gpu(const float* y, std::size_t n, const CqtParams& p, int mode, Matrix* outf,
+                    ComplexMatrix* outc) {
+    if (!gpu_available() || n < 1 || n > static_cast<std::size_t>(std::numeric_limits<int>::max()))
         return false;
     try {
         Engine& eng = engine_for(p);
@@ -462,17 +464,17 @@ static bool run_metal(const float* y, std::size_t n, const CqtParams& p, int mod
     }
 }
 
-bool cqt_metal(const float* y, std::size_t n, const CqtParams& p, Matrix& out, int output_mode) {
+bool cqt_gpu(const float* y, std::size_t n, const CqtParams& p, Matrix& out, int output_mode) {
     if (output_mode < 0 || output_mode > 2) return false;
-    return run_metal(y, n, p, output_mode, &out, nullptr);
+    return run_gpu(y, n, p, output_mode, &out, nullptr);
 }
 
-bool cqt_complex_metal(const float* y, std::size_t n, const CqtParams& p, ComplexMatrix& out) {
-    return run_metal(y, n, p, 3, nullptr, &out);
+bool cqt_complex_gpu(const float* y, std::size_t n, const CqtParams& p, ComplexMatrix& out) {
+    return run_gpu(y, n, p, 3, nullptr, &out);
 }
 
-bool chroma_metal(const float* y, std::size_t n, double sr, int hop, int bins_per_octave,
-                      int n_octaves, int n_chroma, double fmin, Matrix& out) {
+bool chroma_gpu(const float* y, std::size_t n, double sr, int hop, int bins_per_octave,
+                    int n_octaves, int n_chroma, double fmin, Matrix& out) {
     const double f0 = (fmin > 0.0) ? fmin : detail::kC1Hz;
     CqtParams p;
     p.sr = sr;
@@ -481,9 +483,21 @@ bool chroma_metal(const float* y, std::size_t n, double sr, int hop, int bins_pe
     p.n_bins = n_octaves * bins_per_octave;
     p.bins_per_octave = bins_per_octave;
     Matrix mag;
-    if (!cqt_metal(y, n, p, mag)) return false;
+    if (!cqt_gpu(y, n, p, mag)) return false;
     out = detail::chroma_fold(mag, bins_per_octave, n_chroma, f0);
     return true;
 }
+
+// The resident (DLPack) path is CUDA-only for now; on Apple, MPS tensors are
+// staged through unified memory by the Python layer, which is nearly free.
+DeviceTensor cqt_gpu_resident(DeviceTensor, int, const CqtParams&, int, std::uintptr_t, int*) {
+    throw std::runtime_error("the metal backend has no device-resident path");
+}
+DeviceTensor chroma_gpu_resident(DeviceTensor, int, double, int, int, int, int, double,
+                                 std::uintptr_t, int*) {
+    throw std::runtime_error("the metal backend has no device-resident path");
+}
+int dlpack_device_type() { return 8; }  // kDLMetal
+void device_tensor_free(void*) noexcept {}
 
 }  // namespace auvux::fastchroma

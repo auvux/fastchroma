@@ -15,6 +15,7 @@
 #include <map>
 #include <mutex>
 #include <new>
+#include <stdexcept>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -324,16 +325,27 @@ Matrix chroma(const float* y, std::size_t n, double sr, int hop, int bins_per_oc
     return detail::chroma_fold(mag, bins_per_octave, n_chroma, f0);
 }
 
-#ifndef FASTCHROMA_METAL
-// Stubs for non-Apple builds; the real implementations are in metal_backend.mm.
-bool metal_available() { return false; }
-bool cqt_metal(const float*, std::size_t, const CqtParams&, Matrix&, int) { return false; }
-bool cqt_complex_metal(const float*, std::size_t, const CqtParams&, ComplexMatrix&) {
+#if !defined(FASTCHROMA_METAL) && !defined(FASTCHROMA_CUDA)
+// Stubs for CPU-only builds; the real implementations are in
+// metal_backend.mm / cuda_backend.cu.
+bool gpu_available() { return false; }
+const char* gpu_backend() { return "none"; }
+bool cqt_gpu(const float*, std::size_t, const CqtParams&, Matrix&, int) { return false; }
+bool cqt_complex_gpu(const float*, std::size_t, const CqtParams&, ComplexMatrix&) {
     return false;
 }
-bool chroma_metal(const float*, std::size_t, double, int, int, int, int, double, Matrix&) {
+bool chroma_gpu(const float*, std::size_t, double, int, int, int, int, double, Matrix&) {
     return false;
 }
+DeviceTensor cqt_gpu_resident(DeviceTensor, int, const CqtParams&, int, std::uintptr_t, int*) {
+    throw std::runtime_error("this fastchroma build has no GPU backend");
+}
+DeviceTensor chroma_gpu_resident(DeviceTensor, int, double, int, int, int, int, double,
+                                 std::uintptr_t, int*) {
+    throw std::runtime_error("this fastchroma build has no GPU backend");
+}
+int dlpack_device_type() { return 0; }
+void device_tensor_free(void*) noexcept {}
 #endif
 
 }  // namespace auvux::fastchroma

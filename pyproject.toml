@@ -37,5 +37,17 @@ test-command = "pytest {project}/tests -q"
 [tool.cibuildwheel.macos]
 archs = ["arm64", "x86_64"]
 
+# CUDA-enabled Linux/Windows wheels. nvcc is needed at build time only
+# (manylinux+CUDA images on Linux; a toolkit install step in wheels.yml on
+# Windows): cudart is linked statically, so at runtime the wheel needs just
+# the NVIDIA driver and degrades to gpu_available() == False / the CPU path
+# without one. CMAKE_ARGS forces the backend so a missing toolkit fails the
+# build instead of silently shipping a CPU-only wheel.
 [tool.cibuildwheel.linux]
 archs = ["x86_64", "aarch64"]
+manylinux-x86_64-image = "quay.io/manylinux_cuda/manylinux_2_28_x86_64_cuda12_9:latest"
+manylinux-aarch64-image = "quay.io/manylinux_cuda/manylinux_2_28_aarch64_cuda12_9:latest"
+environment = { CMAKE_ARGS = "-DFASTCHROMA_GPU=cuda" }
+
+[tool.cibuildwheel.windows]
+environment = { CMAKE_ARGS = "-DFASTCHROMA_GPU=cuda" }
