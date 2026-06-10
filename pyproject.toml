@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "fastchroma"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fast constant-Q transform and chromagram"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -38,4 +38,4 @@ test-command = "pytest {project}/tests -q"
 archs = ["arm64", "x86_64"]
 
 [tool.cibuildwheel.linux]
-archs = ["x86_64"]
+archs = ["x86_64", "aarch64"]

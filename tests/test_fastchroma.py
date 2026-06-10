@@ -17,9 +17,9 @@ def signal(seconds=8.0):
 
 def test_shapes():
     y = signal(4.0)
-    chroma = fastchroma.chroma_cqt(y, sr=SR, hop_length=512)
+    chroma = fastchroma.chroma(y, sr=SR, hop_length=512)
     assert chroma.shape[0] == 12
-    cqt = fastchroma.cqt_magnitude(y, sr=SR, hop_length=512, n_bins=84)
+    cqt = fastchroma.cqt(y, sr=SR, hop_length=512, n_bins=84)
     assert cqt.shape[0] == 84
     assert chroma.shape[1] == cqt.shape[1]
     assert np.all(np.isfinite(chroma)) and np.all(chroma >= 0)
@@ -30,10 +30,14 @@ def test_object_api():
     cqt = fastchroma.CQT(sr=SR, hop_length=512, n_bins=84, bins_per_octave=12)
     assert cqt.frequencies.shape == (84,)
     assert np.allclose(cqt.frequencies[0], 32.70319566, rtol=1e-6)
-    assert np.array_equal(cqt(y), fastchroma.cqt_magnitude(y, sr=SR, hop_length=512))
-    assert np.array_equal(cqt(y, output="power"), cqt(y) ** 2)
+    assert np.array_equal(cqt(y), fastchroma.cqt(y, sr=SR, hop_length=512))
+    # power may be fused in-kernel (metal) rather than squared after the fact
+    assert np.allclose(cqt(y, output="power"), cqt(y) ** 2, rtol=1e-6, atol=1e-12)
+    assert np.allclose(cqt(y, output="db"),
+                       10.0 * np.log10(np.maximum(cqt(y, output="power"), 1e-10)),
+                       rtol=1e-5, atol=1e-4)
     chroma = fastchroma.Chroma(sr=SR, hop_length=512)(y)
-    assert np.array_equal(chroma, fastchroma.chroma_cqt(y, sr=SR, hop_length=512))
+    assert np.array_equal(chroma, fastchroma.chroma(y, sr=SR, hop_length=512))
 
 
 def test_complex_output():
@@ -41,14 +45,16 @@ def test_complex_output():
     cqt = fastchroma.CQT(sr=SR, hop_length=512, n_bins=84, bins_per_octave=12)
     z = cqt(y, output="complex")
     assert z.dtype == np.complex64
-    # magnitude of the complex output equals the magnitude transform
+    # magnitude of the complex output equals the magnitude transform (same
+    # backend for both, so only abs() rounding differs)
     assert np.allclose(np.abs(z), cqt(y), rtol=1e-5, atol=1e-6)
 
 
 def test_complex_matches_librosa():
     librosa = pytest.importorskip("librosa")
     y = signal()
-    z = fastchroma.cqt_complex(y, sr=SR, hop_length=512, n_bins=84, bins_per_octave=12)
+    z = fastchroma.cqt(y, sr=SR, hop_length=512, n_bins=84, bins_per_octave=12,
+                       output="complex")
     ref = librosa.cqt(y=y, sr=SR, hop_length=512, n_bins=84, bins_per_octave=12,
                       tuning=0.0).astype(np.complex64)
     n = min(z.shape[1], ref.shape[1])
@@ -65,8 +71,8 @@ def test_odd_hop_warns():
 def test_matches_librosa(bins_per_octave):
     librosa = pytest.importorskip("librosa")
     y = signal()
-    got = fastchroma.chroma_cqt(y, sr=SR, hop_length=512,
-                                bins_per_octave=bins_per_octave, n_octaves=7)
+    got = fastchroma.chroma(y, sr=SR, hop_length=512,
+                            bins_per_octave=bins_per_octave, n_octaves=7)
     ref = librosa.feature.chroma_cqt(y=y, sr=SR, hop_length=512,
                                      bins_per_octave=bins_per_octave, n_octaves=7,
                                      tuning=0.0).astype(np.float32)

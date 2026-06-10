@@ -18,7 +18,7 @@ py::array_t<float> to_numpy(const Matrix& m) {
     return out;
 }
 
-py::array_t<float> chroma_cqt(FloatArray y, double sr, int hop, int bins_per_octave,
+py::array_t<float> chroma(FloatArray y, double sr, int hop, int bins_per_octave,
                               int n_octaves, int n_chroma, double fmin) {
     const auto buf = y.request();
     const auto* data = static_cast<const float*>(buf.ptr);
@@ -26,7 +26,7 @@ py::array_t<float> chroma_cqt(FloatArray y, double sr, int hop, int bins_per_oct
     Matrix m;
     {
         const py::gil_scoped_release release;
-        m = auvux::fastchroma::chroma_cqt(data, n, sr, hop, bins_per_octave, n_octaves, n_chroma, fmin);
+        m = auvux::fastchroma::chroma(data, n, sr, hop, bins_per_octave, n_octaves, n_chroma, fmin);
     }
     return to_numpy(m);
 }
@@ -42,7 +42,7 @@ auvux::fastchroma::CqtParams make_params(double sr, int hop, double fmin, int n_
     return params;
 }
 
-py::array_t<float> cqt_magnitude(FloatArray y, double sr, int hop, double fmin, int n_bins,
+py::array_t<float> cqt(FloatArray y, double sr, int hop, double fmin, int n_bins,
                                  int bins_per_octave) {
     const auto buf = y.request();
     const auto* data = static_cast<const float*>(buf.ptr);
@@ -51,8 +51,61 @@ py::array_t<float> cqt_magnitude(FloatArray y, double sr, int hop, double fmin, 
     Matrix m;
     {
         const py::gil_scoped_release release;
-        m = auvux::fastchroma::cqt_magnitude(data, n, params);
+        m = auvux::fastchroma::cqt(data, n, params);
     }
+    return to_numpy(m);
+}
+
+// Metal variants return None when the backend is unavailable or the parameters
+// are unsupported; the Python layer decides whether to fall back or raise.
+py::object cqt_metal(FloatArray y, double sr, int hop, double fmin, int n_bins,
+                     int bins_per_octave, int output_mode) {
+    const auto buf = y.request();
+    const auto* data = static_cast<const float*>(buf.ptr);
+    const auto n = static_cast<std::size_t>(buf.size);
+    const auto params = make_params(sr, hop, fmin, n_bins, bins_per_octave);
+    Matrix m;
+    bool ok = false;
+    {
+        const py::gil_scoped_release release;
+        ok = auvux::fastchroma::cqt_metal(data, n, params, m, output_mode);
+    }
+    if (!ok) return py::none();
+    return to_numpy(m);
+}
+
+py::object cqt_complex_metal(FloatArray y, double sr, int hop, double fmin, int n_bins,
+                             int bins_per_octave) {
+    const auto buf = y.request();
+    const auto* data = static_cast<const float*>(buf.ptr);
+    const auto n = static_cast<std::size_t>(buf.size);
+    const auto params = make_params(sr, hop, fmin, n_bins, bins_per_octave);
+    ComplexMatrix m;
+    bool ok = false;
+    {
+        const py::gil_scoped_release release;
+        ok = auvux::fastchroma::cqt_complex_metal(data, n, params, m);
+    }
+    if (!ok) return py::none();
+    py::array_t<std::complex<float>> out({m.rows, m.cols});
+    auto* o = out.mutable_data();
+    for (std::size_t i = 0; i < m.re.size(); ++i) o[i] = {m.re[i], m.im[i]};
+    return out;
+}
+
+py::object chroma_metal(FloatArray y, double sr, int hop, int bins_per_octave,
+                            int n_octaves, int n_chroma, double fmin) {
+    const auto buf = y.request();
+    const auto* data = static_cast<const float*>(buf.ptr);
+    const auto n = static_cast<std::size_t>(buf.size);
+    Matrix m;
+    bool ok = false;
+    {
+        const py::gil_scoped_release release;
+        ok = auvux::fastchroma::chroma_metal(data, n, sr, hop, bins_per_octave, n_octaves,
+                                                 n_chroma, fmin, m);
+    }
+    if (!ok) return py::none();
     return to_numpy(m);
 }
 
@@ -76,10 +129,18 @@ py::array_t<std::complex<float>> cqt_complex(FloatArray y, double sr, int hop, d
 }  // namespace
 
 PYBIND11_MODULE(_fastchroma, m) {
-    m.def("chroma_cqt", &chroma_cqt, py::arg("y"), py::arg("sr"), py::arg("hop"),
+    m.def("chroma", &chroma, py::arg("y"), py::arg("sr"), py::arg("hop"),
           py::arg("bins_per_octave"), py::arg("n_octaves"), py::arg("n_chroma"), py::arg("fmin"));
-    m.def("cqt_magnitude", &cqt_magnitude, py::arg("y"), py::arg("sr"), py::arg("hop"),
+    m.def("cqt", &cqt, py::arg("y"), py::arg("sr"), py::arg("hop"),
           py::arg("fmin"), py::arg("n_bins"), py::arg("bins_per_octave"));
     m.def("cqt_complex", &cqt_complex, py::arg("y"), py::arg("sr"), py::arg("hop"),
           py::arg("fmin"), py::arg("n_bins"), py::arg("bins_per_octave"));
+    m.def("metal_available", &auvux::fastchroma::metal_available);
+    m.def("cqt_metal", &cqt_metal, py::arg("y"), py::arg("sr"), py::arg("hop"),
+          py::arg("fmin"), py::arg("n_bins"), py::arg("bins_per_octave"),
+          py::arg("output_mode") = 0);
+    m.def("cqt_complex_metal", &cqt_complex_metal, py::arg("y"), py::arg("sr"), py::arg("hop"),
+          py::arg("fmin"), py::arg("n_bins"), py::arg("bins_per_octave"));
+    m.def("chroma_metal", &chroma_metal, py::arg("y"), py::arg("sr"), py::arg("hop"),
+          py::arg("bins_per_octave"), py::arg("n_octaves"), py::arg("n_chroma"), py::arg("fmin"));
 }

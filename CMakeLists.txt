@@ -27,6 +27,20 @@ pybind11_add_module(_fastchroma src/fastchroma.cpp src/bindings.cpp)
 target_include_directories(_fastchroma PRIVATE src src/third_party)
 target_link_libraries(_fastchroma PRIVATE Threads::Threads)
 
+# Metal GPU backend on Apple: kernels compile at runtime from source, so this
+# only needs the frameworks — no metallib step, no extra dependencies.
+if(APPLE)
+  enable_language(OBJCXX)
+  set(CMAKE_OBJCXX_STANDARD 17)
+  set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+  target_sources(_fastchroma PRIVATE src/metal_backend.mm)
+  set_source_files_properties(src/metal_backend.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_compile_definitions(_fastchroma PRIVATE FASTCHROMA_METAL=1)
+  find_library(METAL_FRAMEWORK Metal REQUIRED)
+  find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  target_link_libraries(_fastchroma PRIVATE ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
+endif()
+
 if(FASTCHROMA_FFT STREQUAL "vdsp")
   find_library(ACCELERATE Accelerate REQUIRED)
   target_link_libraries(_fastchroma PRIVATE ${ACCELERATE})
